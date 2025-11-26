@@ -422,7 +422,10 @@ public final class McsNetworkingProvider
             final String clusterId,
             final String portName) {
 
-        String serviceName = podName + "-mcs";
+        // Get the Kafka cluster name from the Reconciliation
+        String clusterName = reconciliation.name();
+        // Use the shared headless service name: <cluster-name>-kafka-brokers
+        String serviceName = clusterName + "-kafka-brokers";
 
         // Get the service to find the port number
         return centralSupplier.serviceOperations
@@ -450,6 +453,9 @@ public final class McsNetworkingProvider
                     clustersetDomain,
                     port.getPort()
                 );
+
+                LOGGER.debug("{}: Discovered endpoint for pod {}: {}",
+                        reconciliation, podName, dnsName);
 
                 return dnsName;
             });
@@ -554,14 +560,18 @@ public final class McsNetworkingProvider
         // Format: <nodeId>@<pod>.<cluster-id>.<service>.<namespace>
         // .svc.<clusterset-domain>:<port>
 
+        // Get the Kafka cluster name from the Reconciliation
+        String clusterName = reconciliation.name();
+        // Use the shared headless service name: <cluster-name>-kafka-brokers
+        String serviceName = clusterName + "-kafka-brokers";
+
         List<String> voters = new ArrayList<>();
-        // Replication port is always 9091 for internal Kafka communication
-        int port = PORT_REPLICATION;
+        // Control plane port is always 9090 for KRaft controller communication
+        int port = PORT_CONTROL_PLANE;
 
         for (ControllerPodInfo controller : controllerPods) {
             String podName = controller.podName();
             String clusterId = controller.clusterId();
-            String serviceName = podName; // For per-pod services
 
             // Generate MCS DNS name
             String dnsName = String.format("%s.%s.%s.%s.svc.%s",
@@ -595,12 +605,15 @@ public final class McsNetworkingProvider
             final String podName,
             final String clusterId) {
 
-        // Return MCS DNS names as SANs
-        String serviceName = podName + "-mcs";
+        // Get the Kafka cluster name from the Reconciliation
+        String clusterName = reconciliation.name();
+        // Use the shared headless service name: <cluster-name>-kafka-brokers
+        String serviceName = clusterName + "-kafka-brokers";
 
         List<String> sans = new ArrayList<>();
 
-        // Add MCS DNS name
+        // Add MCS DNS name for this specific pod
+        // Format: <pod>.<cluster-id>.<service>.<namespace>.svc.<clusterset-domain>
         String mcsDns = String.format("%s.%s.%s.%s.svc.%s",
             podName,
             clusterId,
@@ -610,14 +623,8 @@ public final class McsNetworkingProvider
         );
         sans.add(mcsDns);
 
-        // Add wildcard for all ports
-        String wildcardDns = String.format("*.%s.%s.%s.svc.%s",
-            clusterId,
-            serviceName,
-            namespace,
-            clustersetDomain
-        );
-        sans.add(wildcardDns);
+        LOGGER.debug("{}: Generated certificate SAN for pod {}: {}",
+                reconciliation, podName, mcsDns);
 
         return Future.succeededFuture(sans);
     }
@@ -629,26 +636,25 @@ public final class McsNetworkingProvider
             final String podName,
             final String clusterId) {
 
-        String serviceName = podName + "-mcs";
+        // Get the Kafka cluster name from the Reconciliation
+        String clusterName = reconciliation.name();
+        // Use the shared headless service name: <cluster-name>-kafka-brokers
+        String serviceName = clusterName + "-kafka-brokers";
 
         LOGGER.debug(
-                "{}: Deleting MCS resources {} in cluster {}",
-                reconciliation, serviceName, clusterId);
+                "{}: Deleting MCS resources {} in cluster {} (called for pod {})",
+                reconciliation, serviceName, clusterId, podName);
 
-        // Delete ServiceExport first
-        try {
-            serviceExportHelper.delete(namespace, serviceName);
-            LOGGER.debug("{}: Deleted ServiceExport {} in cluster {}",
-                       reconciliation, serviceName, clusterId);
-        } catch (Exception e) {
-            LOGGER.warn("{}: Failed to delete ServiceExport {}: {}",
-                       reconciliation, serviceName, e.getMessage());
-        }
+        // Note: Since we use a shared service per cluster (not per-pod),
+        // we should NOT delete the service when a single pod is deleted.
+        // The service should only be deleted when the entire Kafka cluster is deleted.
+        // This method is called per-pod, so we just log and return success.
+        
+        LOGGER.debug("{}: Skipping deletion of shared service {} (per-pod deletion)",
+                   reconciliation, serviceName);
 
-        // Then delete Service
-        return centralSupplier.serviceOperations
-            .reconcile(reconciliation, namespace, serviceName, null)
-            .mapEmpty();
+        // Return success without deleting the shared service
+        return Future.succeededFuture();
     }
 
     @Override
