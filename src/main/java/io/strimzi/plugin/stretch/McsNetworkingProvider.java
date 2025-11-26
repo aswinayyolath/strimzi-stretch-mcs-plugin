@@ -589,40 +589,6 @@ public final class McsNetworkingProvider
     }
 
     @Override
-    public Future<List<String>> generateCertificateSans(
-            final Reconciliation reconciliation,
-            final String namespace,
-            final String podName,
-            final String clusterId) {
-
-        // Return MCS DNS names as SANs
-        String serviceName = podName + "-mcs";
-
-        List<String> sans = new ArrayList<>();
-
-        // Add MCS DNS name
-        String mcsDns = String.format("%s.%s.%s.%s.svc.%s",
-            podName,
-            clusterId,
-            serviceName,
-            namespace,
-            clustersetDomain
-        );
-        sans.add(mcsDns);
-
-        // Add wildcard for all ports
-        String wildcardDns = String.format("*.%s.%s.%s.svc.%s",
-            clusterId,
-            serviceName,
-            namespace,
-            clustersetDomain
-        );
-        sans.add(wildcardDns);
-
-        return Future.succeededFuture(sans);
-    }
-
-    @Override
     public Future<Void> deleteNetworkingResources(
             final Reconciliation reconciliation,
             final String namespace,
