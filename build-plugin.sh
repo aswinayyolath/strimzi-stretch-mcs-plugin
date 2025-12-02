@@ -28,10 +28,10 @@ fi
 
 # Install the JAR to local Maven repo
 mvn install:install-file \
-  -Dfile=cluster-operator/target/cluster-operator-0.46.0.jar \
+  -Dfile=cluster-operator/target/cluster-operator-0.48.0.jar \
   -DgroupId=io.strimzi \
   -DartifactId=cluster-operator \
-  -Dversion=0.46.0 \
+  -Dversion=0.48.0 \
   -Dpackaging=jar \
   -q
 

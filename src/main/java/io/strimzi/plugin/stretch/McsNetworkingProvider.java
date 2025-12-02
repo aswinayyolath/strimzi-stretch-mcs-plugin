@@ -239,51 +239,54 @@ public final class McsNetworkingProvider
             .collect(Collectors.toList());
 
         // Build service with appropriate selector based on pod type
-        ServiceBuilder serviceBuilder = new ServiceBuilder()
-            .withNewMetadata()
-                .withName(serviceName)
-                .withNamespace(namespace)
-                .addToLabels("app", "strimzi")
-                .addToLabels("strimzi.io/cluster", clusterName)
-                .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
-            .endMetadata()
-            .withNewSpec()
-                .withType("ClusterIP")
-                .withClusterIP("None") // Headless service
-                .withPorts(servicePorts);
-
+        Service service;
+        
         if (isLatencyTestPod) {
             // For latency test pods, use selector that matches test pod labels
             // Test pods have labels: app=strimzi-latency-test, strimzi.io/kind=latency-test, strimzi.io/cluster-id=<cluster-id>
-            // We can't use pod name as selector since pods don't have that as a label by default
-            // Instead, use a combination of app and cluster-id to target the specific test pod
-            serviceBuilder
-                .editSpec()
+            service = new ServiceBuilder()
+                .withNewMetadata()
+                    .withName(serviceName)
+                    .withNamespace(namespace)
+                    .addToLabels("app", "strimzi")
+                    .addToLabels("strimzi.io/cluster", clusterName)
+                    .addToLabels("strimzi.io/kind", "latency-test")
+                    .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
+                .endMetadata()
+                .withNewSpec()
+                    .withType("ClusterIP")
+                    .withClusterIP("None") // Headless service
+                    .withPorts(servicePorts)
                     .addToSelector("app", "strimzi-latency-test")
                     .addToSelector("strimzi.io/cluster-id", clusterId)
                     .addToSelector("strimzi.io/kind", "latency-test")
                 .endSpec()
-                .editMetadata()
-                    .addToLabels("strimzi.io/kind", "latency-test")
-                .endMetadata();
+                .build();
             LOGGER.debug("{}: Creating service for latency test pod {} with selector app=strimzi-latency-test, strimzi.io/cluster-id={}",
                        reconciliation, podName, clusterId);
         } else {
             // For Kafka brokers, selector matches ALL broker pods in this cluster
             // Selector: strimzi.io/cluster=<cluster-name>, strimzi.io/kind=Kafka, strimzi.io/name=<cluster-name>-kafka
-            serviceBuilder
-                .editSpec()
+            service = new ServiceBuilder()
+                .withNewMetadata()
+                    .withName(serviceName)
+                    .withNamespace(namespace)
+                    .addToLabels("app", "strimzi")
+                    .addToLabels("strimzi.io/cluster", clusterName)
+                    .addToLabels("strimzi.io/kind", "Kafka")
+                    .addToLabels("strimzi.io/name", clusterName + "-kafka")
+                    .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
+                .endMetadata()
+                .withNewSpec()
+                    .withType("ClusterIP")
+                    .withClusterIP("None") // Headless service
+                    .withPorts(servicePorts)
                     .addToSelector("strimzi.io/cluster", clusterName)
                     .addToSelector("strimzi.io/kind", "Kafka")
                     .addToSelector("strimzi.io/name", clusterName + "-kafka")
                 .endSpec()
-                .editMetadata()
-                    .addToLabels("strimzi.io/kind", "Kafka")
-                    .addToLabels("strimzi.io/name", clusterName + "-kafka")
-                .endMetadata();
+                .build();
         }
-
-        Service service = serviceBuilder.build();
 
         // Get ServiceExportHelper for this cluster
         ServiceExportHelper helper = remoteServiceExportHelpers.get(clusterId);
