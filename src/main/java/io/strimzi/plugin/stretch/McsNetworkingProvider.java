@@ -143,26 +143,10 @@ public final class McsNetworkingProvider
         // Determine if this is the central cluster
         boolean isCentralCluster = (supplier == centralSupplier);
 
-        // Detect if this is a latency test pod (used by network latency validator)
-        // Test pods have names like: strimzi-latency-test-<cluster>-<timestamp>
-        boolean isLatencyTestPod = podName.startsWith("strimzi-latency-test-");
-
-        // For latency test pods, create a per-pod service
-        // For regular Kafka brokers, create one shared headless service per cluster
+        // Service name is the SAME across all clusters: <kafka-cluster-name>-kafka-brokers
+        // This allows MCS to aggregate them into a single ServiceImport
         String clusterName = reconciliation.name();
-        String serviceName;
-
-        if (isLatencyTestPod) {
-            // Per-pod service for latency testing
-            serviceName = podName;
-            LOGGER.debug("{}: Detected latency test pod {}, will create per-pod service",
-                       reconciliation, podName);
-        } else {
-            // Shared service for all Kafka brokers
-            // Service name is the SAME across all clusters: <kafka-cluster-name>-kafka-brokers
-            // This allows MCS to aggregate them into a single ServiceImport
-            serviceName = clusterName + "-kafka-brokers";
-        }
+        String serviceName = clusterName + "-kafka-brokers";
         
         // Use clusterId to ensure we only create this service once per physical cluster
         String serviceKey = clusterId + "/" + namespace + "/" + serviceName;
@@ -181,20 +165,9 @@ public final class McsNetworkingProvider
             
             // Check if we already processed this service in this reconciliation
             if (createdServices.contains(serviceKey)) {
-                LOGGER.debug("{}: Service {} already processed in this reconciliation for cluster {} (serviceKey: {}), returning existing Service",
+                LOGGER.debug("{}: Service {} already processed in this reconciliation for cluster {} (serviceKey: {}), skipping creation",
                            reconciliation, serviceName, clusterId, serviceKey);
-
-                // Fetch and return the existing Service so callers (like latency validator) can use it
-                Service existingService = supplier.serviceOperations.get(namespace, serviceName);
-                if (existingService != null) {
-                    LOGGER.debug("{}: Found existing Service {} in cluster {}, returning it",
-                               reconciliation, serviceName, clusterId);
-                    return Future.succeededFuture(List.of(existingService));
-                } else {
-                    LOGGER.warn("{}: Service {} was marked as processed but not found in cluster {}",
-                               reconciliation, serviceName, clusterId);
-                    return Future.succeededFuture(new ArrayList<>());
-                }
+                return Future.succeededFuture(new ArrayList<>());
             }
             
             // Check if ServiceExport already exists in the cluster
@@ -206,21 +179,10 @@ public final class McsNetworkingProvider
 
             GenericKubernetesResource existingExport = helper.get(namespace, serviceName);
             if (existingExport != null) {
-                LOGGER.debug("{}: ServiceExport {} already exists in cluster {}, returning existing Service",
+                LOGGER.debug("{}: ServiceExport {} already exists in cluster {}, skipping creation",
                            reconciliation, serviceName, clusterId);
                 createdServices.add(serviceKey);
-
-                // Fetch and return the existing Service so callers (like latency validator) can use it
-                Service existingService = supplier.serviceOperations.get(namespace, serviceName);
-                if (existingService != null) {
-                    LOGGER.debug("{}: Found existing Service {} in cluster {}, returning it",
-                               reconciliation, serviceName, clusterId);
-                    return Future.succeededFuture(List.of(existingService));
-                } else {
-                    LOGGER.warn("{}: ServiceExport exists but Service {} not found in cluster {}",
-                               reconciliation, serviceName, clusterId);
-                    return Future.succeededFuture(new ArrayList<>());
-                }
+                return Future.succeededFuture(new ArrayList<>());
             }
             
             LOGGER.info("{}: ServiceExport {} does not exist in cluster {}, will create it",
@@ -238,55 +200,28 @@ public final class McsNetworkingProvider
             })
             .collect(Collectors.toList());
 
-        // Build service with appropriate selector based on pod type
-        Service service;
-        
-        if (isLatencyTestPod) {
-            // For latency test pods, use selector that matches test pod labels
-            // Test pods have labels: app=strimzi-latency-test, strimzi.io/kind=latency-test, strimzi.io/cluster-id=<cluster-id>
-            service = new ServiceBuilder()
-                .withNewMetadata()
-                    .withName(serviceName)
-                    .withNamespace(namespace)
-                    .addToLabels("app", "strimzi")
-                    .addToLabels("strimzi.io/cluster", clusterName)
-                    .addToLabels("strimzi.io/kind", "latency-test")
-                    .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
-                .endMetadata()
-                .withNewSpec()
-                    .withType("ClusterIP")
-                    .withClusterIP("None") // Headless service
-                    .withPorts(servicePorts)
-                    .addToSelector("app", "strimzi-latency-test")
-                    .addToSelector("strimzi.io/cluster-id", clusterId)
-                    .addToSelector("strimzi.io/kind", "latency-test")
-                .endSpec()
-                .build();
-            LOGGER.debug("{}: Creating service for latency test pod {} with selector app=strimzi-latency-test, strimzi.io/cluster-id={}",
-                       reconciliation, podName, clusterId);
-        } else {
-            // For Kafka brokers, selector matches ALL broker pods in this cluster
-            // Selector: strimzi.io/cluster=<cluster-name>, strimzi.io/kind=Kafka, strimzi.io/name=<cluster-name>-kafka
-            service = new ServiceBuilder()
-                .withNewMetadata()
-                    .withName(serviceName)
-                    .withNamespace(namespace)
-                    .addToLabels("app", "strimzi")
-                    .addToLabels("strimzi.io/cluster", clusterName)
-                    .addToLabels("strimzi.io/kind", "Kafka")
-                    .addToLabels("strimzi.io/name", clusterName + "-kafka")
-                    .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
-                .endMetadata()
-                .withNewSpec()
-                    .withType("ClusterIP")
-                    .withClusterIP("None") // Headless service
-                    .withPorts(servicePorts)
-                    .addToSelector("strimzi.io/cluster", clusterName)
-                    .addToSelector("strimzi.io/kind", "Kafka")
-                    .addToSelector("strimzi.io/name", clusterName + "-kafka")
-                .endSpec()
-                .build();
-        }
+        // Create headless service that selects ALL broker pods in this cluster
+        // Selector: strimzi.io/cluster=<cluster-name>, strimzi.io/kind=Kafka, strimzi.io/name=<cluster-name>-kafka
+        Service service = new ServiceBuilder()
+            .withNewMetadata()
+                .withName(serviceName)
+                .withNamespace(namespace)
+                .addToLabels("app", "strimzi")
+                .addToLabels("strimzi.io/cluster", clusterName)
+                .addToLabels("strimzi.io/kind", "Kafka")
+                .addToLabels("strimzi.io/name", clusterName + "-kafka")
+                .addToAnnotations("strimzi.io/stretch-cluster-id", clusterId)
+            .endMetadata()
+            .withNewSpec()
+                .withType("ClusterIP")
+                .withClusterIP("None") // Headless service
+                .withPorts(servicePorts)
+                // Selector matches ALL broker pods in this cluster
+                .addToSelector("strimzi.io/cluster", clusterName)
+                .addToSelector("strimzi.io/kind", "Kafka")
+                .addToSelector("strimzi.io/name", clusterName + "-kafka")
+            .endSpec()
+            .build();
 
         // Get ServiceExportHelper for this cluster
         ServiceExportHelper helper = remoteServiceExportHelpers.get(clusterId);
