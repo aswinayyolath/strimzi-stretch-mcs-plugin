@@ -15,6 +15,7 @@ import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.ServicePortBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.strimzi.api.kafka.model.kafka.Kafka;
+import io.strimzi.operator.cluster.operator.assembly.KafkaListenersReconciler;
 import io.strimzi.operator.cluster.operator.resource.ResourceOperatorSupplier;
 import io.strimzi.operator.cluster.stretch.RemoteResourceOperatorSupplier;
 import io.strimzi.operator.cluster.stretch.spi.StretchNetworkingProvider;
@@ -122,7 +123,6 @@ public final class McsNetworkingProvider
     @Override
     public Future<List<HasMetadata>> createNetworkingResources(
             final Reconciliation reconciliation,
-            final String namespace,
             final String podName,
             final String clusterId,
             final Map<String, Integer> ports) {
@@ -143,15 +143,13 @@ public final class McsNetworkingProvider
         // Determine if this is the central cluster
         boolean isCentralCluster = (supplier == centralSupplier);
 
-        // For MCS, we create one headless service per cluster that covers ALL brokers
         // Service name is the SAME across all clusters: <kafka-cluster-name>-kafka-brokers
         // This allows MCS to aggregate them into a single ServiceImport
-        // Get the Kafka cluster name from the Reconciliation (this is the Kafka CR name)
         String clusterName = reconciliation.name();
         String serviceName = clusterName + "-kafka-brokers";
         
         // Use clusterId to ensure we only create this service once per physical cluster
-        String serviceKey = clusterId + "/" + namespace + "/" + serviceName;
+        String serviceKey = clusterId + "/" + reconciliation.namespace() + "/" + serviceName;
         String reconciliationKey = reconciliation.toString();
 
         // Check if we've already created this service in this reconciliation
@@ -167,7 +165,7 @@ public final class McsNetworkingProvider
             
             // Check if we already processed this service in this reconciliation
             if (createdServices.contains(serviceKey)) {
-                LOGGER.debug("{}: Service {} already processed in this reconciliation for cluster {} (serviceKey: {}), skipping",
+                LOGGER.debug("{}: Service {} already processed in this reconciliation for cluster {} (serviceKey: {}), skipping creation",
                            reconciliation, serviceName, clusterId, serviceKey);
                 return Future.succeededFuture(new ArrayList<>());
             }
@@ -179,7 +177,7 @@ public final class McsNetworkingProvider
                 helper = serviceExportHelper; // fallback to central
             }
 
-            GenericKubernetesResource existingExport = helper.get(namespace, serviceName);
+            GenericKubernetesResource existingExport = helper.get(reconciliation.namespace(), serviceName);
             if (existingExport != null) {
                 LOGGER.debug("{}: ServiceExport {} already exists in cluster {}, skipping creation",
                            reconciliation, serviceName, clusterId);
@@ -207,7 +205,7 @@ public final class McsNetworkingProvider
         Service service = new ServiceBuilder()
             .withNewMetadata()
                 .withName(serviceName)
-                .withNamespace(namespace)
+                .withNamespace(reconciliation.namespace())
                 .addToLabels("app", "strimzi")
                 .addToLabels("strimzi.io/cluster", clusterName)
                 .addToLabels("strimzi.io/kind", "Kafka")
@@ -240,7 +238,7 @@ public final class McsNetworkingProvider
         annotations.put("strimzi.io/stretch-cluster-id", clusterId);
 
         GenericKubernetesResource serviceExport = helper.create(
-            serviceName, namespace, labels, annotations);
+            serviceName, reconciliation.namespace(), labels, annotations);
 
         // Set owner reference based on cluster type
         if (isCentralCluster) {
@@ -248,7 +246,7 @@ public final class McsNetworkingProvider
             try {
                 HasMetadata kafkaCr = supplier.getKubernetesClient()
                     .resources(Kafka.class)
-                    .inNamespace(namespace)
+                    .inNamespace(reconciliation.namespace())
                     .withName(clusterName)
                     .get();
                 
@@ -284,7 +282,7 @@ public final class McsNetworkingProvider
             // Fetch the GC ConfigMap to get its UID
             ConfigMap gcConfigMap = null;
             try {
-                gcConfigMap = supplier.configMapOperations.get(namespace, gcConfigMapName);
+                gcConfigMap = supplier.configMapOperations.get(reconciliation.namespace(), gcConfigMapName);
             } catch (Exception e) {
                 LOGGER.warn("{}: Failed to fetch GC ConfigMap {} in cluster {}: {}",
                            reconciliation, gcConfigMapName, clusterId, e.getMessage());
@@ -327,7 +325,7 @@ public final class McsNetworkingProvider
         } else {
             // Create service in remote cluster
             serviceFuture = supplier.serviceOperations
-                .reconcile(reconciliation, namespace, serviceName, service)
+                .reconcile(reconciliation, reconciliation.namespace(), serviceName, service)
                 .compose(serviceResult -> {
                     resources.add(service);
                     LOGGER.debug("{}: Created/updated service {} in remote cluster {}",
@@ -385,19 +383,19 @@ public final class McsNetworkingProvider
     }
 
     @Override
-    public String generateServiceDnsName(final String namespace,
+    public Future<String> generateServiceDnsName(final String namespace,
                                           final String serviceName,
                                           final String clusterId) {
         // MCS format: <service>.<cluster-id>.<namespace>.svc.<clusterset-domain>
-        return String.format("%s.%s.%s.svc.%s",
+        return Future.succeededFuture(String.format("%s.%s.%s.svc.%s",
             serviceName,
             clusterId,
             namespace,
-            clustersetDomain);
+            clustersetDomain));
     }
 
     @Override
-    public String generatePodDnsName(final String namespace,
+    public Future<String> generatePodDnsName(final String namespace,
                                       final String serviceName,
                                       final String podName,
                                       final String clusterId) {
@@ -411,12 +409,11 @@ public final class McsNetworkingProvider
         
         LOGGER.debug("Generated MCS DNS for pod {}: {}", podName, dns);
         
-        return dns;
+        return Future.succeededFuture(dns);
     }
 
     @Override
     public Future<String> discoverPodEndpoint(
-            final Reconciliation reconciliation,
             final String namespace,
             final String podName,
             final String clusterId,
@@ -458,7 +455,6 @@ public final class McsNetworkingProvider
     @Override
     public Future<String> generateAdvertisedListeners(
             final Reconciliation reconciliation,
-            final String namespace,
             final String podName,
             final String clusterId,
             final Map<String, String> listeners) {
@@ -467,6 +463,8 @@ public final class McsNetworkingProvider
         // discover services
         // MCS DNS format: <pod>.<cluster-id>.<service>.<namespace>
         // .svc.<clusterset-domain>:<port>
+
+        LOGGER.info("listenerReconciliationResults: {}", listeners);
 
         List<String> listenerStrings = new ArrayList<>();
 
@@ -488,7 +486,7 @@ public final class McsNetworkingProvider
                 podName,
                 clusterId,
                 serviceName,
-                namespace,
+                reconciliation.namespace(),
                 clustersetDomain
             );
 
@@ -546,7 +544,6 @@ public final class McsNetworkingProvider
     @Override
     public Future<String> generateQuorumVoters(
             final Reconciliation reconciliation,
-            final String namespace,
             final List<ControllerPodInfo> controllerPods,
             final String replicationPortName) {
 
@@ -554,21 +551,24 @@ public final class McsNetworkingProvider
         // Format: <nodeId>@<pod>.<cluster-id>.<service>.<namespace>
         // .svc.<clusterset-domain>:<port>
 
+        // Get the Kafka cluster name from the Reconciliation (this is the Kafka CR name)
+        String clusterName = reconciliation.name();
+        // Use headless service name: <cluster-name>-kafka-brokers
+        String serviceName = clusterName + "-kafka-brokers";
+
         List<String> voters = new ArrayList<>();
-        // Replication port is always 9091 for internal Kafka communication
-        int port = PORT_REPLICATION;
+        int port = PORT_CONTROL_PLANE;
 
         for (ControllerPodInfo controller : controllerPods) {
             String podName = controller.podName();
             String clusterId = controller.clusterId();
-            String serviceName = podName; // For per-pod services
 
             // Generate MCS DNS name
             String dnsName = String.format("%s.%s.%s.%s.svc.%s",
                 podName,
                 clusterId,
                 serviceName,
-                namespace,
+                reconciliation.namespace(),
                 clustersetDomain
             );
 
@@ -589,43 +589,8 @@ public final class McsNetworkingProvider
     }
 
     @Override
-    public Future<List<String>> generateCertificateSans(
-            final Reconciliation reconciliation,
-            final String namespace,
-            final String podName,
-            final String clusterId) {
-
-        // Return MCS DNS names as SANs
-        String serviceName = podName + "-mcs";
-
-        List<String> sans = new ArrayList<>();
-
-        // Add MCS DNS name
-        String mcsDns = String.format("%s.%s.%s.%s.svc.%s",
-            podName,
-            clusterId,
-            serviceName,
-            namespace,
-            clustersetDomain
-        );
-        sans.add(mcsDns);
-
-        // Add wildcard for all ports
-        String wildcardDns = String.format("*.%s.%s.%s.svc.%s",
-            clusterId,
-            serviceName,
-            namespace,
-            clustersetDomain
-        );
-        sans.add(wildcardDns);
-
-        return Future.succeededFuture(sans);
-    }
-
-    @Override
     public Future<Void> deleteNetworkingResources(
             final Reconciliation reconciliation,
-            final String namespace,
             final String podName,
             final String clusterId) {
 
@@ -637,7 +602,7 @@ public final class McsNetworkingProvider
 
         // Delete ServiceExport first
         try {
-            serviceExportHelper.delete(namespace, serviceName);
+            serviceExportHelper.delete(reconciliation.namespace(), serviceName);
             LOGGER.debug("{}: Deleted ServiceExport {} in cluster {}",
                        reconciliation, serviceName, clusterId);
         } catch (Exception e) {
@@ -647,7 +612,7 @@ public final class McsNetworkingProvider
 
         // Then delete Service
         return centralSupplier.serviceOperations
-            .reconcile(reconciliation, namespace, serviceName, null)
+            .reconcile(reconciliation, reconciliation.namespace(), serviceName, null)
             .mapEmpty();
     }
 

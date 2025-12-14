@@ -18,7 +18,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         
         <!-- Dependency versions -->
-        <strimzi.version>0.46.0</strimzi.version>
+        <strimzi.version>0.48.0</strimzi.version>
         <kubernetes-client.version>6.13.4</kubernetes-client.version>
         <log4j.version>2.24.1</log4j.version>
         <vertx.version>4.5.14</vertx.version>
